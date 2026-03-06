@@ -196,8 +196,14 @@ if __name__ == '__main__':
     tok = Tokenizer.load("tokenizer.json")
     vocab_size = len(tok.vocab)
 
-    # Tokenize training corpus
-    with open("tokenizer_train.txt", "r", encoding="utf-8") as f:
+    # Tokenize training corpus (stream from FineWeb-Edu if file not present)
+    corpus_path = "tokenizer_train.txt"
+    if not os.path.exists(corpus_path):
+        print(f"'{corpus_path}' not found — streaming from FineWeb-Edu (200 MB)...")
+        from data.dataset import stream_fineweb_for_tokenizer
+        stream_fineweb_for_tokenizer(target_mb=200, save_path=corpus_path)
+
+    with open(corpus_path, "r", encoding="utf-8") as f:
         text = f.read()
     token_ids = tok.encode(text)
     data = torch.tensor(token_ids, dtype=torch.long)
