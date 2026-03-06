@@ -54,25 +54,34 @@ def clip_grad_norm(params, max_norm: float = 1.0) -> float:  # fix: was `> float
     return total_norm 
 
 def save_checkpoint(
-    model: torch.nn.Module, 
-    optimizer: AdamW, 
-    step: int, 
-    loss: float, 
-    path: str, 
-): 
-    """Save full training state to disk"""
+    model: torch.nn.Module,
+    optimizer: AdamW,
+    step: int,
+    loss: float,
+    path: str,
+    drive_dir: str = None,
+):
+    """Save full training state to disk, and mirror to Google Drive if drive_dir given."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.save({
         'step': step,
         'loss': loss,
-        'model_state': model.state_dict(),  # fix: missing comma
+        'model_state': model.state_dict(),
         'optimizer_state': {
             't': optimizer.t,
             'm': [m.clone() for m in optimizer.m],
             'v': [v.clone() for v in optimizer.v],
         }
     }, path)
-    print(f" [ckpt] Saved -> {path}")
+    print(f"[ckpt] Saved -> {path}")
+
+    # Mirror to Google Drive so it survives Colab disconnections
+    if drive_dir:
+        import shutil
+        os.makedirs(drive_dir, exist_ok=True)
+        dest = os.path.join(drive_dir, os.path.basename(path))
+        shutil.copy2(path, dest)
+        print(f"[ckpt] Mirrored -> {dest}")
     
 
 def load_checkpoint(
@@ -97,7 +106,7 @@ def load_checkpoint(
 
 
 def train(
-    model: TransformerLM,  # fix: missing comma
+    model: TransformerLM,
     optimizer: AdamW,
     data: torch.Tensor,
     total_steps: int,
@@ -106,9 +115,10 @@ def train(
     max_lr: float = 3e-4,
     min_lr: float = 3e-5,
     warmup_steps: int = 100,
-    max_grad_norm: float = 1.0,  # fix: was missing, used inside function
+    max_grad_norm: float = 1.0,
     ckpt_every: int = 500,
-    ckpt_dir: str = "checkpoints",  # fix: was missing, used inside function
+    ckpt_dir: str = "checkpoints",
+    drive_dir: str = None,  # Google Drive mirror path; None = local only
     device: str = "cpu",
     start_step: int = 0,
 ):
@@ -170,11 +180,12 @@ def train(
             )
         
 
-        # Step 8: Checkpointing 
+        # Step 8: Checkpointing
         if step > 0 and step % ckpt_every == 0:
             save_checkpoint(
                 model, optimizer, step, loss.item(),
-                path=f"{ckpt_dir}/step_{step:06d}.pt"
+                path=f"{ckpt_dir}/step_{step:06d}.pt",
+                drive_dir=drive_dir,
             )
     
     print("\nTraining complete")
@@ -184,13 +195,23 @@ def train(
 if __name__ == '__main__':
     import sys
     import os
-    # Ensure project root is on the path when run directly
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
     from model.components import TransformerLM, AdamW
     from tokenizer.tokenizer import Tokenizer
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # ── Google Drive setup (Colab only) ───────────────────────────────────
+    DRIVE_CKPT_DIR = None
+    try:
+        from google.colab import drive as _drive
+        _drive.mount('/content/drive', force_remount=False)
+        DRIVE_CKPT_DIR = '/content/drive/MyDrive/miniLLM_checkpoints'
+        os.makedirs(DRIVE_CKPT_DIR, exist_ok=True)
+        print(f"[drive] Checkpoints will be mirrored to {DRIVE_CKPT_DIR}")
+    except Exception:
+        pass  # not running in Colab, skip silently
 
     # Load tokenizer
     tok = Tokenizer.load("tokenizer.json")
@@ -199,7 +220,7 @@ if __name__ == '__main__':
     # Tokenize training corpus (stream from FineWeb-Edu if file not present)
     corpus_path = "tokenizer_train.txt"
     if not os.path.exists(corpus_path):
-        print(f"'{corpus_path}' not found — streaming from FineWeb-Edu (200 MB)...")
+        print(f"'{corpus_path}' not found - streaming from FineWeb-Edu (200 MB)...")
         from data.dataset import stream_fineweb_for_tokenizer
         stream_fineweb_for_tokenizer(target_mb=200, save_path=corpus_path)
 
@@ -221,13 +242,27 @@ if __name__ == '__main__':
 
     optimizer = AdamW(model.parameters(), lr=3e-4)
 
-    # Resume from latest checkpoint if one exists
+    # ── Resume from latest checkpoint ────────────────────────────────────
+    # Prefer Drive checkpoints (persistent) over local ones
     ckpt_dir = "checkpoints"
     start_step = 0
-    if os.path.isdir(ckpt_dir):
-        ckpts = sorted(f for f in os.listdir(ckpt_dir) if f.endswith('.pt'))
-        if ckpts:
-            start_step = load_checkpoint(model, optimizer, os.path.join(ckpt_dir, ckpts[-1]))
+
+    def _latest_ckpt(directory):
+        if directory and os.path.isdir(directory):
+            pts = sorted(f for f in os.listdir(directory) if f.endswith('.pt'))
+            return os.path.join(directory, pts[-1]) if pts else None
+        return None
+
+    resume_path = _latest_ckpt(DRIVE_CKPT_DIR) or _latest_ckpt(ckpt_dir)
+    if resume_path:
+        # Copy Drive checkpoint to local dir so save_checkpoint path is consistent
+        if DRIVE_CKPT_DIR and resume_path.startswith(DRIVE_CKPT_DIR):
+            import shutil
+            os.makedirs(ckpt_dir, exist_ok=True)
+            local_copy = os.path.join(ckpt_dir, os.path.basename(resume_path))
+            shutil.copy2(resume_path, local_copy)
+            resume_path = local_copy
+        start_step = load_checkpoint(model, optimizer, resume_path)
 
     train(
         model=model,
@@ -242,6 +277,7 @@ if __name__ == '__main__':
         max_grad_norm=1.0,
         ckpt_every=500,
         ckpt_dir=ckpt_dir,
+        drive_dir=DRIVE_CKPT_DIR,
         device=device,
         start_step=start_step,
     )
